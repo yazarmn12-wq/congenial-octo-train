@@ -1,0 +1,211 @@
+name: win 10 RDP growtopia
+
+on:
+  workflow_dispatch:
+
+jobs:
+  secure-rdp:
+    runs-on: windows-2022
+    timeout-minutes: 350
+
+    steps:
+      - name: Configure Core RDP Settings
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+                             -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                             -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                             -Name "SecurityLayer" -Value 0 -Force
+
+          netsh advfirewall firewall delete rule name="RDP-Tailscale"
+          
+          netsh advfirewall firewall add rule name="RDP-Tailscale" `
+            dir=in action=allow protocol=TCP localport=3389
+
+          Restart-Service -Name TermService -Force
+
+      - name: Create RDP User with Fixed Password
+        run: |
+          $password = "MR.English2008"
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+
+          if (-not (Get-LocalUser -Name "ME2008" -ErrorAction SilentlyContinue)) {
+              New-LocalUser -Name "ME2008" -Password $securePass -AccountNeverExpires
+          }
+
+          Add-LocalGroupMember -Group "Administrators" -Member "ME2008" -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "ME2008" -ErrorAction SilentlyContinue
+          
+          echo "RDP_CREDS= $password" >> $env:GITHUB_ENV
+          
+          if (-not (Get-LocalUser -Name "ME2008")) {
+              Write-Error "User creation failed"
+              exit 1
+          }
+
+      - name: Install Tailscale
+        run: |
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.92.3-amd64.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
+          
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+
+          Start-Process msiexec.exe `
+            -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" `
+            -Wait
+
+          Remove-Item $installerPath -Force
+
+      - name: Establish Tailscale Connection
+        run: |
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up `
+            --authkey=${{ secrets.TAILSCALE_AUTHKEY }} `
+            --hostname=gh-runner-$env:GITHUB_RUN_ID
+          
+          $tsIP = $null
+          $retries = 0
+
+          while (-not $tsIP -and $retries -lt 10) {
+              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+              Start-Sleep -Seconds 5
+              $retries++
+          }
+          
+          if (-not $tsIP) {
+              Write-Error "Tailscale IP not assigned. Exiting."
+              exit 1
+          }
+
+          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+
+      - name: Verify RDP Accessibility
+        run: |
+          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
+          
+          $testResult = Test-NetConnection `
+            -ComputerName $env:TAILSCALE_IP `
+            -Port 3389
+
+          if (-not $testResult.TcpTestSucceeded) {
+              Write-Error "TCP connection to RDP port 3389 failed"
+              exit 1
+          }
+
+          Write-Host "TCP connectivity successful!"
+
+      - name: Download and Extract Arsip
+        run: |
+          $pageUrl = "https://www.mediafire.com/file/q2hp0l62oxnauhq/Arsip.zip/file"
+          $zipPath = "$env:TEMP\Arsip.zip"
+          $extractPath = "C:\RDP\Arsip"
+
+          Write-Host "Downloading Arsip.zip..."
+
+          $page = Invoke-WebRequest `
+            -Uri $pageUrl `
+            -UseBasicParsing
+
+          $downloadUrl = $page.Links |
+            Where-Object {
+              $_.href -match "download.*mediafire\.com"
+            } |
+            Select-Object -First 1 -ExpandProperty href
+
+          if (-not $downloadUrl) {
+              $match = [regex]::Match(
+                $page.Content,
+                'https://download[^"'' ]+mediafire\.com[^"'' ]+'
+              )
+
+              if ($match.Success) {
+                  $downloadUrl = $match.Value
+              }
+          }
+
+          if (-not $downloadUrl) {
+              Write-Error "MediaFire download URL not found."
+              exit 1
+          }
+
+          Write-Host "Downloading ZIP..."
+
+          Invoke-WebRequest `
+            -Uri $downloadUrl `
+            -OutFile $zipPath `
+            -UseBasicParsing
+
+          $size = (Get-Item $zipPath).Length
+
+          Write-Host "Downloaded size: $size bytes"
+
+          if ($size -lt 1000000) {
+              Write-Error "Downloaded file is suspiciously small."
+              exit 1
+          }
+
+          Write-Host "Preparing extraction directory..."
+
+          New-Item `
+            -ItemType Directory `
+            -Path "C:\RDP" `
+            -Force | Out-Null
+
+          if (Test-Path $extractPath) {
+              Remove-Item `
+                $extractPath `
+                -Recurse `
+                -Force
+          }
+
+          New-Item `
+            -ItemType Directory `
+            -Path $extractPath `
+            -Force | Out-Null
+
+          Write-Host "Extracting Arsip.zip..."
+
+          Expand-Archive `
+            -Path $zipPath `
+            -DestinationPath $extractPath `
+            -Force
+
+          Write-Host "Extraction completed."
+
+          Write-Host "`n=== ARSIP CONTENT ==="
+
+          Get-ChildItem `
+            -Path $extractPath `
+            -Recurse `
+            -File |
+            Select-Object FullName, Length |
+            Format-Table -AutoSize
+
+          Write-Host "====================="
+
+          Remove-Item `
+            $zipPath `
+            -Force `
+            -ErrorAction SilentlyContinue
+
+          Write-Host "Arsip.zip removed from TEMP."
+          Write-Host "Files are ready at: $extractPath"
+
+      - name: Maintain Connection + Watch RDP User
+        run: |
+          Write-Host "Thanks to MR.English2008 for this perfect work"
+          Write-Host "follow for more in my telegram channel"
+          Write-Host "https://t.me/ME2008_RDP"
+          
+          Write-Host "`n=== RDP ACCESS ==="
+          Write-Host "Address: $env:TAILSCALE_IP"
+          Write-Host "Username: ME2008"
+          Write-Host "Password: $(echo $env:RDP_CREDS)"
+          Write-Host "==================`n"
+
+          Write-Host "Arsip location: C:\RDP\Arsip"
+
+          while ($true) {
+              Write-Host "[$(Get-Date)] RDP Active - MR.English2008"
+              Start-Sleep -Seconds 300
+          }
