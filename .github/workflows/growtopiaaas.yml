@@ -1,4 +1,4 @@
-name: win 10 Growtopia
+name: win 10 RDP tailscale
 
 on:
   workflow_dispatch:
@@ -29,11 +29,13 @@ jobs:
         run: |
           $password = "MR.English2008"
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+
           if (-not (Get-LocalUser -Name "ME2008" -ErrorAction SilentlyContinue)) {
               New-LocalUser -Name "ME2008" -Password $securePass -AccountNeverExpires
           }
-          Add-LocalGroupMember -Group "Administrators" -Member "ME2008"
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "ME2008"
+
+          Add-LocalGroupMember -Group "Administrators" -Member "ME2008" -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "ME2008" -ErrorAction SilentlyContinue
          
           echo "RDP_CREDS= $password" >> $env:GITHUB_ENV
          
@@ -48,11 +50,16 @@ jobs:
           $installerPath = "$env:TEMP\tailscale.msi"
          
           Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
-          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+          
+          Start-Process msiexec.exe `
+            -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" `
+            -Wait
+          
           Remove-Item $installerPath -Force
 
+
       # ==========================================
-      # INSTALL MUMU PLAYER 6.0.1
+      # DOWNLOAD + INSTALL MUMU 6.0.1
       # ==========================================
       - name: Install MuMu Player
         run: |
@@ -61,16 +68,23 @@ jobs:
 
           Write-Host "Downloading MuMu Player 6.0.1..."
 
-          $page = Invoke-WebRequest -Uri $pageUrl -UseBasicParsing
+          $page = Invoke-WebRequest `
+            -Uri $pageUrl `
+            -UseBasicParsing
 
           $downloadUrl = $page.Links |
-            Where-Object { $_.href -match "download.*mediafire\.com" } |
+            Where-Object {
+              $_.href -match "download.*mediafire\.com"
+            } |
             Select-Object -First 1 -ExpandProperty href
 
           if (-not $downloadUrl) {
+              Write-Host "Normal MediaFire link not found."
+              Write-Host "Searching page source..."
+
               $match = [regex]::Match(
-                  $page.Content,
-                  'https://download[^"'' ]+mediafire\.com[^"'' ]+'
+                $page.Content,
+                'https://download[^"'' ]+mediafire\.com[^"'' ]+'
               )
 
               if ($match.Success) {
@@ -79,9 +93,11 @@ jobs:
           }
 
           if (-not $downloadUrl) {
-              Write-Error "MediaFire download URL not found."
+              Write-Error "Could not find MediaFire download URL."
               exit 1
           }
+
+          Write-Host "Downloading installer..."
 
           Invoke-WebRequest `
             -Uri $downloadUrl `
@@ -89,26 +105,58 @@ jobs:
             -UseBasicParsing
 
           if (-not (Test-Path $installerPath)) {
-              Write-Error "MuMu installer download failed."
+              Write-Error "MuMu installer was not downloaded."
+              exit 1
+          }
+
+          $size = (Get-Item $installerPath).Length
+
+          Write-Host "Installer size: $size bytes"
+
+          if ($size -lt 100000) {
+              Write-Error "Downloaded installer appears invalid."
               exit 1
           }
 
           Write-Host "Installing MuMu Player..."
+          Write-Host "Maximum installation wait: 90 seconds"
 
-          Start-Process `
+          $process = Start-Process `
             -FilePath $installerPath `
             -ArgumentList "/S" `
-            -Wait
+            -PassThru
 
-          Remove-Item $installerPath -Force -ErrorAction SilentlyContinue
+          $finished = $process.WaitForExit(90000)
 
-          Write-Host "MuMu Player installation finished."
+          if (-not $finished) {
+
+              Write-Host "MuMu installer did not finish within 90 seconds."
+
+              Stop-Process `
+                -Id $process.Id `
+                -Force `
+                -ErrorAction SilentlyContinue
+
+              Write-Error "MuMu installation timed out."
+              exit 1
+          }
+
+          Write-Host "MuMu installer finished."
+          Write-Host "Exit code: $($process.ExitCode)"
+
+          Remove-Item `
+            $installerPath `
+            -Force `
+            -ErrorAction SilentlyContinue
+
 
       # ==========================================
-      # LAUNCH MUMU
+      # FIND + LAUNCH MUMU
       # ==========================================
       - name: Launch MuMu Player
         run: |
+          Write-Host "Searching for MuMu Player..."
+
           $possiblePaths = @(
               "${env:ProgramFiles}\Netease\MuMuPlayerGlobal-6.0\mumuw.exe",
               "${env:ProgramFiles(x86)}\Netease\MuMuPlayerGlobal-6.0\mumuw.exe",
@@ -119,36 +167,56 @@ jobs:
           )
 
           $mumu = $possiblePaths |
-            Where-Object { Test-Path $_ } |
+            Where-Object {
+              Test-Path $_
+            } |
             Select-Object -First 1
 
           if ($mumu) {
-              Write-Host "MuMu found: $mumu"
+
+              Write-Host "MuMu found:"
+              Write-Host $mumu
+
+              Write-Host "Launching MuMu Player..."
+
               Start-Process $mumu
-              Start-Sleep -Seconds 15
+
+              Start-Sleep -Seconds 20
+
               Write-Host "MuMu Player started."
+
           }
           else {
+
               Write-Host "MuMu not found in default paths."
               Write-Host "Searching Program Files..."
 
-              $mumu = Get-ChildItem `
+              $mumuSearch = Get-ChildItem `
                 -Path "C:\Program Files","C:\Program Files (x86)" `
                 -Filter "mumuw.exe" `
                 -Recurse `
                 -ErrorAction SilentlyContinue |
                 Select-Object -First 1
 
-              if ($mumu) {
-                  Write-Host "MuMu found: $($mumu.FullName)"
-                  Start-Process $mumu.FullName
-                  Start-Sleep -Seconds 15
+              if ($mumuSearch) {
+
+                  Write-Host "MuMu found:"
+                  Write-Host $mumuSearch.FullName
+
+                  Start-Process $mumuSearch.FullName
+
+                  Start-Sleep -Seconds 20
+
+                  Write-Host "MuMu Player started."
+
               }
               else {
-                  Write-Error "MuMu executable not found."
+
+                  Write-Error "MuMu Player executable could not be found."
                   exit 1
               }
           }
+
 
       - name: Establish Tailscale Connection
         run: |
@@ -156,9 +224,13 @@ jobs:
          
           $tsIP = $null
           $retries = 0
+
           while (-not $tsIP -and $retries -lt 10) {
+
               $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+
               Start-Sleep -Seconds 5
+
               $retries++
           }
          
@@ -166,17 +238,22 @@ jobs:
               Write-Error "Tailscale IP not assigned. Exiting."
               exit 1
           }
+
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
      
       - name: Verify RDP Accessibility
         run: |
           Write-Host "Tailscale IP: $env:TAILSCALE_IP"
          
-          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+          $testResult = Test-NetConnection `
+            -ComputerName $env:TAILSCALE_IP `
+            -Port 3389
+
           if (-not $testResult.TcpTestSucceeded) {
               Write-Error "TCP connection to RDP port 3389 failed"
               exit 1
           }
+
           Write-Host "TCP connectivity successful!"
 
       - name: Maintain Connection + Watch RDP User
